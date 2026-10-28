@@ -1,0 +1,76 @@
+name: build-dolphinios-unsigned
+on:
+  workflow_dispatch:
+    inputs:
+      scheme:
+        description: "Xcode scheme (empty = auto-detect)"
+        default: ""
+      configuration:
+        description: "Build configuration"
+        default: "Release"
+
+jobs:
+  build:
+    runs-on: macos-latest
+    timeout-minutes: 180
+    env:
+      PROJECT: Source/iOS/App/DolphiniOS.xcodeproj
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          submodules: recursive
+
+      - name: Toolchain info
+        run: |
+          sw_vers
+          xcodebuild -version
+
+      - name: Install tools (from README)
+        run: brew install cmake ninja bartycrouch jq
+
+      - name: Set placeholder bundle identifier
+        run: |
+          BID=$(find . -name BundleIdentifier.xcconfig | head -n1)
+          test -n "$BID" || { echo "BundleIdentifier.xcconfig not found"; exit 1; }
+          sed -i '' 's|use.your.own.organization.identifier|com.example.dolphinios|' "$BID"
+          grep -n "com.example.dolphinios" "$BID"
+
+      - name: Discover schemes
+        id: discover
+        run: |
+          xcodebuild -list -project "$PROJECT"
+          SCHEME="${{ inputs.scheme }}"
+          if [ -z "$SCHEME" ]; then
+            ALL=$(xcodebuild -list -json -project "$PROJECT" | jq -r '.project.schemes[]')
+            SCHEME=$(echo "$ALL" | grep -x 'DolphiniOS' || echo "$ALL" | head -n1)
+          fi
+          echo "Using scheme: $SCHEME"
+          echo "scheme=$SCHEME" >> "$GITHUB_OUTPUT"
+
+      - name: Build (unsigned)
+        run: |
+          set -o pipefail
+          xcodebuild -project "$PROJECT" \
+            -scheme "${{ steps.discover.outputs.scheme }}" \
+            -configuration "${{ inputs.configuration }}" \
+            -sdk iphoneos -destination 'generic/platform=iOS' \
+            -derivedDataPath build/DerivedData \
+            CODE_SIGNING_ALLOWED=NO CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" build 2>&1 | tee build.log
+
+      - name: Package IPA
+        run: |
+          APP=$(find build/DerivedData/Build/Products -maxdepth 2 -name '*.app' -path '*-iphoneos/*' | head -n1)
+          test -n "$APP" || { echo "No .app produced"; exit 1; }
+          echo "Packaging: $APP"
+          mkdir Payload && cp -R "$APP" Payload/
+          zip -qry DolphiniOS-unsigned.ipa Payload
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: build-output
+          path: |
+            DolphiniOS-unsigned.ipa
+            build.log
+
